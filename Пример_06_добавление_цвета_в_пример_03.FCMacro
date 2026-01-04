@@ -1,0 +1,63 @@
+import FreeCAD
+from FreeCAD import Base
+import Part
+import math
+
+# Создай вектор мо массиву из трёх вещественных чисел (координат [x,y,z])
+f_3d_point = lambda arr: FreeCAD.Vector(arr[0], arr[1], arr[2])
+
+# Пример отрезка и дуги. Элемент массива либо 2 точки, либо 3 точки (массив длины 2 или 3)
+def f_my_arr_AB_or_ABC():
+    O = f_3d_point([0,0,0])
+    A = f_3d_point([1,1,0])
+    B = f_3d_point([2,0,0])
+    C = O
+    LINE = [O,A]
+    ARC = [A,B,C]
+    return [LINE, ARC]
+
+def f_parse_path(arr_AB_or_ABC):
+    # В путе либо 2 точки (отрезок AB), либо 3 точки (дуга ABC)
+    ARR_PATH = []
+    
+    for el in arr_AB_or_ABC:
+        # добавь отрезок по двум точкам
+        if (len(el) == 2):
+            # Звёздочка * распаковывает массив длины 2 
+            # Делай из массива две отдельные точки A,B
+            ARR_PATH.append(Part.LineSegment(*el))
+        # добавь дугу по трём точкам
+        elif (len(el) == 3):
+            ARR_PATH.append(Part.Arc(*el))
+          
+    # синтаксис спискового включения
+    # аналог list(map(lambda x: x**2, [0,1,2,3]
+    return [i_obj.toShape() for i_obj in ARR_PATH]
+    
+    
+def f_path_prism(arr_AB_or_ABC, h = 1):
+    # Парсим SVG-путь и создаем edges
+    edges = f_parse_path(arr_AB_or_ABC)
+    # Создаем wire из edges
+    wire = Part.Wire(edges)
+    # Создаем грань
+    face = Part.Face(wire)
+
+    # Выдавливаем призму высотой 1
+    return face.extrude(Base.Vector(0, 0, h))
+
+ # Создаем новый документ, если нет активного
+if not FreeCAD.ActiveDocument:
+    doc = FreeCAD.newDocument("SVGPathPrism")
+else:
+    doc = FreeCAD.ActiveDocument
+# Добавляем в документ
+def f_add_shape_with_name_and_color(my_shape = f_path_prism(f_my_arr_AB_or_ABC(), 1), my_name = "my_name", my_color = (0, 255, 0)):
+    path_black = doc.addObject("Part::Feature", my_name)
+    path_black.Shape = my_shape
+    path_black.ViewObject.ShapeColor =  my_color
+
+f_add_shape_with_name_and_color(f_path_prism(f_my_arr_AB_or_ABC(), 1), "my_green", (0,255,0))
+f_add_shape_with_name_and_color(f_path_prism(f_my_arr_AB_or_ABC(), -1), "my_blue", (0,0,255))
+
+doc.recompute()
