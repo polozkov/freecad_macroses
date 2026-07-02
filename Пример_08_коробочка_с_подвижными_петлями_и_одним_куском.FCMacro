@@ -1,0 +1,378 @@
+# Программа - макрос чертит во FreeCAD коробочку для 3д печати с подвижными сгибателями
+# коробочка имеет защёлки, которые не выпирают и идут ровно. Код: Полозков Сергей Сергеевич
+
+# запуск - во FreeCAD добавьте этот код в папку для макросов и нажмите F6
+
+# ВНУТРЕННИЕ РАЗМЕРЫ КОРОБОЧКИ аргуметы функции: ребро итогового куба без зазоров # зазоры по всем трём сторона
+def f_calculate_inner_box_sizes(CUBE_SIDE = 60, CONST_BOX_INNER_SIZES_GAPS = [2,2,2]):
+    # параметры для вычисления размера коробочки для головоломки "перекраиваем параллелепипед 2х1х1 в куб 60 мм" с зазором
+    # корень кубический из трёх для вычисления размеров промежуточного параллелепипеда
+    CONST_Q2 = (2**(1/3))
+    # размеры промежуточного блока (смотри книгу Гарри Линдгрена "занимаетльные задачи на разрезание" - главу про объёмные 3д)
+    CONST_BOX_INNER_SIZES_NO_GAPS = [CUBE_SIDE * CONST_Q2, CUBE_SIDE, CUBE_SIDE / CONST_Q2] 
+    
+    return [63, 63, 46]
+    return [CONST_BOX_INNER_SIZES_NO_GAPS[i] + CONST_BOX_INNER_SIZES_GAPS[i] for i in [0,1,2]]
+
+# итоговый внетренний размер коробочки
+CONST_BOX_INNER_SIZES = f_calculate_inner_box_sizes()
+# зазоры для отверстий (зажимов)
+CONST_HOLE_GAP_50 = 0.26
+# толщина стенки (высота пачатной заготовки)
+CONST_WALL_MATERIAL = 2.4
+# во сколько идти внутрь от краёв
+CONST_OFFSET = 2.4
+
+# количество сгибателей (подвижных - эластичных) по обеи осям - для граней коробочки
+CONST_AMOUNT_DASHES_XY = [5, 4]
+# толщина (ширина) одного сгибателя
+CONST_DASH_W_BAR = 5.0
+
+# сколько прутьев у решёток (сеток)
+CONST_AMOUNT_RATTLES_XY_XZ_ZY = [[3,7], [3,5], [5,3]]
+# толщина (высота) материала для решёток
+CONST_RATTLES_HEGHT = 0.8
+# толщина (ширина) прутьев решётки (одного прута)
+CONST_RATTLES_WIDTH = 2.0
+
+# длина зажима (элемента "папа" - штырёк
+CONST_LEN_PIN = 5.0
+
+# длина подвижного сгибателя
+CONST_FOLD_GAP = 0.5
+# высота подвижного сгибателя
+CONST_FOLD_HEIGHT = 0.2
+
+# объект для перерисовки .recompute()
+from FreeCAD import ActiveDocument, newDocument
+
+# верни документ для центрирования .ActiveView
+from FreeCADGui import activeDocument
+# верни или создай активный документ
+doc = ActiveDocument
+if doc is None:
+    doc = newDocument()
+    
+# вывод в консоль, вектор по трём точках (трёхмерный)
+from FreeCAD import Console, Vector, Matrix
+# рисуй с помощью этих примитивов
+from Part import Wire, LineSegment, Arc, Face, show
+
+# обёртка для класса с данными
+from dataclasses import dataclass, field
+
+import math
+
+# скругление для 90 градусов
+CONST_BULGE_90 = (2 ** 0.5) - 1
+
+# знак вещественного числа [-1..+1]
+F_SIGN = lambda n: 0 if n == 0 else (1 if n > 0 else -1)
+# установи вектору такую длину
+F_SET_LEN = lambda v, new_len: v.normalize().multiply(new_len)
+# вектор - нулевой; по одной из трёх осей (три отдельные функции с одним аргументом)
+F_0 = lambda: Vector(0,0,0); F_XY = lambda x,y: Vector(x,y,0)
+F_X = lambda n: Vector(n,0,0); F_Y = lambda n: Vector(0,n,0); F_Z = lambda n: Vector(0,0,n)
+# генерируй матрицу трансформации по трём осям (задающих поворот в соответстнвии с новыми напрамлениями) и сдвигу
+F_M = lambda VX = F_X(1), VY = F_Y(1), VZ = F_Z(1), C = F_0():  Matrix(VX.x, VX.y, VX.z, C.x,   VY.x, VY.y, VY.z, C.y,   VZ.x, VZ.y, VZ.z, C.z,   0,0,0,1)
+
+# 1 =============================================================================================
+
+# считай точку на середине изгиба дуги (известна нормаль плоскости, для прямой линии bulge = 0,  180 по ч.с. -1, 180 против ч.с. +1)
+def F_BULGE_POINT(va, vb, bulge, v_normal_to_plane):
+    new_length = (vb-va).Length * bulge * 0.5 # длина от середины отрезка (хорды) до середины дуги
+    new_cross_vector_from_mid_to_result = F_SET_LEN((vb-va).cross(v_normal_to_plane), new_length)
+    return (vb + va) * 0.5 + new_cross_vector_from_mid_to_result
+
+# отрезок (или дуга окружности по параметру "изгиб") (считает среднюю точку с изгибом и проводит дугу через неё)
+def f_parse_AB_BULGE(va, vb, bulge, v_normal_to_plane):
+    # начало и конец совпадают, ничего не делай
+    if ((va - vb).Length == 0): return None
+    # нулевая кривизна - это отрезок
+    if (bulge == 0): return LineSegment(va, vb)
+    # считай среднюю точку
+    v_mid = F_BULGE_POINT(va, vb, bulge, v_normal_to_plane)
+    # верни дугу
+    return Arc(va, v_mid, vb)
+
+# впиши, чтобы всё красиво помещалось
+def f_shape_fit_isometric():
+    doc.recompute(); view = activeDocument().ActiveView; view.viewIsometric(); view.fitAll()
+
+# превращает массив форм в одну форму (склеивает и по умолчанию удаляет швы)
+def f_shape_multi_fuse(shapes):
+    return shapes[0].multiFuse(shapes[1:])
+
+# массив из отрезков и дуг -> преврати в проволоку
+def f_convert_my_arr_el_to_wire(my_arr_el):
+    arr_el_as_shapes_before_filtered = [item for item in my_arr_el if item is not None]
+    arr_el_as_shapes_filtered = [i_obj.toShape() for i_obj in arr_el_as_shapes_before_filtered]
+    return Wire(arr_el_as_shapes_filtered)
+    
+# массив из отрезков и дуг -> преврати в shape (форму призму)
+def f_shape_prism_by_arr_el(my_arr_el, v_normal_to_plane):
+    return Face(f_convert_my_arr_el_to_wire(my_arr_el)).extrude(v_normal_to_plane)
+
+# преврати 4 точки в 4 отрезка
+def f_convert_p4_to_4_linesegments(p4):
+    return [LineSegment(p4[0],p4[1]), LineSegment(p4[1],p4[2]), LineSegment(p4[2],p4[3]), LineSegment(p4[3],p4[0])]
+
+# призма по четырём точкам
+def f_shape_prism_by_p4(p4, vz):
+    return f_shape_prism_by_arr_el(f_convert_p4_to_4_linesegments(p4), vz)
+ 
+# верни прямоугольник, вытянутый вверх (прямоугольный параллелепипед) по координатам двух противоположных точек (минимальной и максимальной)  
+def f_shape_prism_by_a3_b3(ax,ay,Z0, bx,by,Z1):
+    p4 = [Vector(ax,ay,Z0), Vector(ax,by,Z0), Vector(bx,by,Z0), Vector(bx,ay,Z0)]
+    return f_shape_prism_by_arr_el(f_convert_p4_to_4_linesegments(p4), F_Z(Z1-Z0))
+
+# срежь прямоугольную рамку с наждой стороны на определённое значение
+def f_shape_prism_by_a3_b3_cut_URDL(ax,ay,az, bx,by,bz, RULD = [0,0,0,0]):
+    R,U,L,D = RULD
+    return f_shape_prism_by_a3_b3(ax+L,ay+D,az, bx-R,by-U,bz)
+
+# 2 =============================================================================================
+
+# пунктирная линия подвижных сгибов
+def f_dashes_one(a,b, n_steps, flag_is_vert, mm_fold_height, w_bar, cut_both_sides_for_offset = 0):
+    # пунктиры на равном расстоянии друг от друга (реши для одного направленя)
+    def f_i_1D(a_coord,b_coord,w,i):
+        ia,ib = a_coord+cut_both_sides_for_offset, b_coord-cut_both_sides_for_offset
+        free_gap = ((ib-ia) - w*(n_steps)) / (n_steps+1)
+        center = ia + (free_gap + w) * (i+1) - (w * 0.5)
+        return [center - (w * 0.5), center + (w * 0.5)]
+    # зажим с таким номером, учитывая, по какой оси вычислять координаты (если flag_is_vert, то считай х-координату
+    def f_i_dash(i):
+        ax,ay, bx,by = a.x,a.y, b.x,b.y
+        if flag_is_vert:
+            ax,bx = f_i_1D(a.x, b.x, w_bar, i)
+        else:
+            ay,by = f_i_1D(a.y, b.y, w_bar, i)
+        # верни этот одиночный пунктир
+        return f_shape_prism_by_a3_b3(ax, ay, 0, bx, by, mm_fold_height)
+        
+    # неколько пунктиров, который ты сейчас вычислил - как подвижные сгибатели
+    ARR_PRISM = [f_i_dash(i_dash) for i_dash in list(range(n_steps))]
+    return f_shape_multi_fuse(ARR_PRISM)
+
+def f_shape_rattle(a_in, b_in, nx, ny, mm_fold_height, w_dash_bar):
+    shape_vert = f_dashes_one(F_XY(a_in.x, a_in.y), F_XY(b_in.x, b_in.y), nx, True, mm_fold_height, w_dash_bar, 0)
+    shape_hory = f_dashes_one(F_XY(a_in.x, a_in.y), F_XY(b_in.x, b_in.y), ny, False, mm_fold_height, w_dash_bar, 0)
+    return shape_vert.fuse(shape_hory)
+    
+# 3 ===========================================================================================
+
+@dataclass  # зажимы (по две штуки на ребра: на четырёх вертикальных рёбрах и на крышке) 
+class class_clamp:
+    # штырёк - размеры зажима (элемент "папа")
+    PIN: Vector = field(default_factory=lambda: Vector(CONST_LEN_PIN, CONST_WALL_MATERIAL, CONST_WALL_MATERIAL * 0.5))
+    
+    # на сколько отступать для отвертия под штырёк-папу
+    mm_hole_gap: float = CONST_HOLE_GAP_50
+    # размер ребра - обычно это ребро идёт вверх - и на этом ребре коробоки делай два зажима (зажим - это мама-папа)
+    mm_inner_z: float = CONST_BOX_INNER_SIZES[2]
+    
+    # вычисли размеры отверстия - верни тип "вектор"
+    def F_HOLE(self): return Vector(
+        CONST_LEN_PIN + (CONST_HOLE_GAP_50*2),
+        CONST_WALL_MATERIAL*0.5 + (self.mm_hole_gap*2),
+        CONST_WALL_MATERIAL
+    )
+    
+    # вычисла размеры оболочко - внешнего контура зажима (зависит от длины ребра, на котором находится этот зажим)    
+    def F_OUTLINE(self): return Vector(
+        self.mm_inner_z / 2 - CONST_HOLE_GAP_50,
+        CONST_WALL_MATERIAL,
+        CONST_WALL_MATERIAL
+    )
+    
+    # кремление "папа" - с учётом матрицы трансформации 
+    def f_clamp_pin(self, m_44 = F_M()):
+        # по оси х - считай центр и отклонение (двойная дельта - это размер штырька)
+        cx = self.mm_inner_z * -0.25; dx = self.PIN.x * 0.5
+        ax, bx = cx - dx, cx + dx
+        ay, by = 0, self.PIN.y
+        Z0,Z1 = 0,self.PIN.z
+        return f_shape_prism_by_a3_b3(ax,ay,Z0, bx,by,Z1).transformed(m_44, copy=True) 
+    
+    # крепление - внешний контур "мамы" 
+    def f_clamp_outline(self, m_44 = F_M()):
+        # по оси х - считай центр и отклонение (двойная дельта - это размер внешнего контура)
+        bx = self.mm_inner_z * 0.5; ax = bx - self.F_OUTLINE().x
+        ay, by = 0, self.F_OUTLINE().y
+        Z0,Z1 = 0,self.F_OUTLINE().z
+        return f_shape_prism_by_a3_b3(ax,ay,Z0, bx,by,Z1).transformed(m_44, copy=True)
+    
+    # штырёк и внешний контур - что надо приращивать к грани (для будущей опреции fuse)
+    def f_clamp_plus(self, m_44 = F_M()):
+        return self.f_clamp_pin(m_44).fuse(self.f_clamp_outline(m_44))
+    
+    # отверстие, которо надо вычитать - под штырёк
+    def f_clamp_hole(self, m_44 = F_M()):
+        cx = self.mm_inner_z * 0.25; dx = self.F_HOLE().x * 0.5
+        ax, bx = cx - dx, cx + dx
+        # self.mm_hole_gap на один зазор отступи (размер F_HOLE().y вычислен с учетом двух зазоров)
+        ay, by = -self.mm_hole_gap, self.F_HOLE().y - self.mm_hole_gap
+        Z0,Z1 = 0,self.F_HOLE().z
+        return f_shape_prism_by_a3_b3(ax,ay,Z0, bx,by,Z1).transformed(m_44, copy=True)      
+     
+@dataclass
+class class_box:
+    # внутренние размеры коробки по трём осям (без учёта стенок)
+    INNER: Vector = field(default_factory=lambda: Vector(*CONST_BOX_INNER_SIZES))
+    
+    # пунктир - подвижные сгибатели
+    DASH: dict = field(default_factory = lambda: {
+        "mm_w_bar": CONST_DASH_W_BAR,
+        # количество подвижных сгибателей по обеим осям (на гранях коробочки)
+        "nx_dashes": CONST_AMOUNT_DASHES_XY[0],
+        "ny_dashes": CONST_AMOUNT_DASHES_XY[1],
+    })
+
+    # информация о подвижных сгибателях (отступ - насколько широкий; высота - насколько толстый)
+    FLEX: dict = field(default_factory = lambda: {
+        "mm_fold_gap": CONST_FOLD_GAP,
+        "mm_fold_height":CONST_FOLD_HEIGHT,
+    })
+    
+    # информация о подвижных сгибателях (отступ - насколько широкий; высота - насколько толстый)
+    RATTLE: dict = field(default_factory = lambda: {
+        "n_rattle_xy_xz_zy": CONST_AMOUNT_RATTLES_XY_XZ_ZY,
+        "mm_rattle_height": CONST_RATTLES_HEGHT,
+        "mm_rattle_width": CONST_RATTLES_WIDTH,
+    })
+    
+    # зажим - по умолчанию для оси z - четыре ребра, 8 пар зажимов типа папа-мама
+    CLAMP: class_clamp = field(default_factory = lambda: class_clamp())
+    
+    # толщина стенки коробки
+    mm_wall: float = CONST_WALL_MATERIAL
+    
+    # на сколько мм каркас идёт внутрь (толщина рамок по осям х,у)
+    mm_offset: float = CONST_OFFSET
+
+    # грань с кромкой по четырём числа (границам на плоскости ху: слева, снизу; справа, сверху)
+    def f_face_with_offset(self, ax, ay, bx, by):
+        # внешняя рамка грани
+        p4_prism_out = f_shape_prism_by_a3_b3_cut_URDL(ax, ay, 0, bx, by, self.mm_wall)
+        # внутренняя рамка грани (внешнюю рамку срезали с четырёх сторон на mm_offset)
+        p4_prism_in  = f_shape_prism_by_a3_b3_cut_URDL(ax, ay, 0, bx, by, self.mm_wall, [self.mm_offset] * 4)
+        return p4_prism_out.cut(p4_prism_in)
+                     
+    # массив форм для всех частей коробочки (всех граней) 
+    def f_draw_total_box(self): 
+        # накопительная сумма (от нуля и в положительные згначения) - добавляя шаги - на сколько смещаться
+        f_sum = lambda input_array: [sum(input_array[:i+1]) for i in range(len(input_array))]
+        
+        # грань-крышечка нависает справа и слева над правой и левой гранями - чтобы прилегала
+        extra_x_top = self.mm_wall - self.FLEX["mm_fold_gap"]
+        # вспомогательные линии по оси х и по оси у (шаги - интервалы) - потом их суммируют накопительной суммой
+        ARR_X = f_sum([0, self.INNER.x * 0.5, self.FLEX["mm_fold_gap"],
+            extra_x_top, self.INNER.z - extra_x_top])
+        ARR_Y = f_sum([0, self.INNER.y * 0.5, self.FLEX["mm_fold_gap"],
+            self.INNER.z, self.FLEX["mm_fold_gap"], self.INNER.y])
+        
+        # кодируем целым числом неотрицательный индекс и знак (по или против оси)
+        f_nxy_to_xy = lambda nx, ny: [ARR_X[abs(nx)] * F_SIGN(nx), ARR_Y[abs(ny)] * F_SIGN(ny)]
+        f_nxy_to_v = lambda nx, ny: Vector(ARR_X[abs(nx)] * F_SIGN(nx), ARR_Y[abs(ny)] * F_SIGN(ny), 0)
+        
+        # рисуй грань по четырём точкам (точки заданы индеаксами - индексы противоположных углов прямоугольника)
+        def f_face_by_n4(nax, nay, nbx, nby, i_face_012):
+            va = F_XY(*f_nxy_to_xy(nax, nay)) 
+            vb = F_XY(*f_nxy_to_xy(nbx, nby))
+            # прямоугольная рамка
+            shape_face_offset = self.f_face_with_offset(va.x, va.y, vb.x, vb.y)
+            
+            # параметры для решётки (количество прутьев)
+            nx,ny = self.RATTLE["n_rattle_xy_xz_zy"][i_face_012]
+            va_in = va + F_XY(self.mm_offset, self.mm_offset)
+            vb_in = vb - F_XY(self.mm_offset, self.mm_offset)
+            # сама решётка
+            shape_rattle = f_shape_rattle(va_in, vb_in, nx, ny, self.RATTLE["mm_rattle_height"], self.RATTLE["mm_rattle_width"])
+            return shape_face_offset.fuse(shape_rattle)
+        
+        # задаём грани номерами на линиях сетки
+        P4_DOWN  = [-1,-1, +1,+1, 0]
+        
+        P4_RIGHT = [+2,-1, +4,+1, 2]
+        P4_LEFT  = [-4,-1, -2,+1, 2]
+        
+        P4_FRONT = [-1,-3, +1,-2, 1]
+        P4_BACK  = [-1,+2, +1,+3, 1] 
+        
+        # верхняя грань особая - нависает и поэтому номер линии х = -3 и +3
+        P4_UP  = [-3,+4, +3,+5, 0]
+        # грани по точкам (P4 - значит 4 параметра - кодирут все 4 границы прямоугольника x1,y1,x2,y2)    
+        ARR_P4_FACES = [P4_DOWN, P4_RIGHT, P4_LEFT, P4_FRONT, P4_BACK, P4_UP]
+        ARR_PRISM = [f_face_by_n4(*i_p4) for i_p4 in ARR_P4_FACES]
+        
+        # пунктирные линии (пять сгибов)         
+        def f_all_dashes():
+            ARR_FOR_X_DASHES = [self.DASH["nx_dashes"], True, self.FLEX["mm_fold_height"], self.DASH["mm_w_bar"], self.mm_offset]
+            ARR_FOR_Y_DASHES = [self.DASH["ny_dashes"], False, self.FLEX["mm_fold_height"], self.DASH["mm_w_bar"], self.mm_offset]
+            
+            DASHES_U = f_dashes_one(f_nxy_to_v(-1,+1), f_nxy_to_v(+1,+2), *ARR_FOR_X_DASHES)
+            DASHES_D = f_dashes_one(f_nxy_to_v(-1,-2), f_nxy_to_v(+1,-1), *ARR_FOR_X_DASHES)
+            
+            DASHES_R = f_dashes_one(f_nxy_to_v(+1,-1), f_nxy_to_v(+2,+1), *ARR_FOR_Y_DASHES)
+            DASHES_L = f_dashes_one(f_nxy_to_v(-2,-1), f_nxy_to_v(-1,+1), *ARR_FOR_Y_DASHES)
+            # последний флаг - истинен, если по оси Х, ложен, если по оси У
+            DASHESUU = f_dashes_one(f_nxy_to_v(-1,+3), f_nxy_to_v(+1,+4), *ARR_FOR_X_DASHES)
+            
+            ARR_DASHES = [DASHES_U, DASHES_D, DASHES_R, DASHES_L, DASHESUU ]
+            return f_shape_multi_fuse(ARR_DASHES) 
+
+        # грани и подвижные сгибы
+        faces_with_dashes = f_shape_multi_fuse([*ARR_PRISM, f_all_dashes()])
+        # середина между двумя точками по сетке - для вычисления нулевой точки пары "папа-мама" - середины базовой линии
+        f_n_mid = lambda ix,iy, jx,jy: f_nxy_to_v(ix, iy) * 0.5 + f_nxy_to_v(jx, jy) * 0.5
+        V_R,V_U,V_L,V_D = F_X(+1), F_Y(+1), F_X(-1), F_Y(-1)
+        # матрицы трансформаций для всех пар папа-мама по оси z - боковыё зажимы-фиксаторы
+        arr_8_m44 = [
+            F_M(V_R, V_U, F_Z(+1), f_n_mid(+2,+1, +4,+1)),
+            F_M(V_L, V_D, F_Z(+1), f_n_mid(+2,-1, +4,-1)),
+            
+            F_M(V_U, V_L, F_Z(+1), f_n_mid(+1,+2, +1,+3)),
+            F_M(V_D, V_R, F_Z(+1), f_n_mid(-1,+2, -1,+3)),
+            
+            F_M(V_R, V_U, F_Z(+1), f_n_mid(-2,+1, -4,+1)),
+            F_M(V_L, V_D, F_Z(+1), f_n_mid(-2,-1, -4,-1)),
+            
+            F_M(V_U, V_L, F_Z(+1), f_n_mid(+1,-2, +1,-3)),
+            F_M(V_D, V_R, F_Z(+1), f_n_mid(-1,-2, -1,-3)),         
+        ]
+        
+        # операция добавления зажима (+штырь, +контур, -отверстие)
+        def f_one_clamp(shape, m, clamp = self.CLAMP): return shape.fuse(clamp.f_clamp_plus(m)).cut(clamp.f_clamp_hole(m))
+        for i_m44 in arr_8_m44: faces_with_dashes = f_one_clamp(faces_with_dashes, i_m44)     
+        
+        # особый зажим для вержней грани (его размер - по оси x, а не по оси z)
+        TOP_CLAMP = class_clamp(mm_inner_z = ARR_X[1]*2)
+        # верхняя грань защёлкивается на нижнюю
+        top_face_m44 = F_M(V_R, V_U, F_Z(+1), f_nxy_to_v(0, 5))
+        faces_with_dashes = f_one_clamp(faces_with_dashes, top_face_m44, TOP_CLAMP)
+        front_face_m44 = F_M(V_L, V_D, F_Z(+1), f_nxy_to_v(0, -3))
+        faces_with_dashes = f_one_clamp(faces_with_dashes, front_face_m44, TOP_CLAMP)
+        
+        # добавь маленький блок-параллелепипед на угол, чтобы зажимы сходились красиво и гладко (по желанию)
+        PA = Vector(ARR_X[3], ARR_Y[5] + TOP_CLAMP.F_OUTLINE().y, 0)
+        PB = Vector(ARR_X[1], ARR_Y[5], self.mm_wall)
+        corner = f_shape_prism_by_a3_b3_cut_URDL(PA.x, PA.y, PA.z, PB.x, PB.y, PB.z)     
+        return faces_with_dashes.fuse(corner)
+
+# функция тестировния для коробочки
+def f_test_class_box():
+    # создай класс "коробочка"
+    my_box = class_box()
+    # эта объект "форма" - который надо показать 
+    my_shape = my_box.f_draw_total_box().removeSplitter()
+    
+    # покажи эту форму
+    show(my_shape)
+    
+    # размерни, чтобы её было всю видно
+    f_shape_fit_isometric()
+    # пиши объём в мм_3
+    Console.PrintMessage(f" ({my_shape.Volume/1000}) ")
+
+f_test_class_box()   

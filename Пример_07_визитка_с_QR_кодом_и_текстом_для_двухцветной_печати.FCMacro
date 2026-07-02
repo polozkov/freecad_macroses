@@ -1,0 +1,192 @@
+# Программа для рисования визиток и QR кода двумя цветами для двухцветной печати 
+# для запуска во FreeCAD 1.1.1 (я использую шрифт ububtu, укажи другой шрифт, если не в Ubuntu)
+# установи библиотеку для QR кодов командой pip install qrcode[pil]
+import qrcode
+import ImportGui
+import os
+
+# объект для перерисовки .recompute()
+from FreeCAD import ActiveDocument, newDocument, getUserMacroDir
+# верни документ для центрирования .ActiveView
+from FreeCADGui import activeDocument
+# верни или создай активный документ
+doc = ActiveDocument
+if doc is None:
+    doc = newDocument()
+    
+# вывод в консоль, вектор по трём точках (трёхмерный)
+from FreeCAD import Console, Vector, Matrix
+# рисуй с помощью этих примитивов
+from Part import Wire, LineSegment, Arc, Face, show
+from Draft import  make_shapestring
+
+# размеры визитной карты: длина, ширина, высота
+CONST_CARD_XYZ = [90, 50, 0.4]
+# скругление угла визитной карточки
+CONST_CARD_RADIUS = 5
+
+# высота текста
+CONST_TEXT_FONT_H = 7
+# междустрочный интервал (шаг по высоте)
+CONST_TEXT_LINE_H = 12
+# средняя линия текста
+CONST_TEXT_BASE = 0.0
+
+# максимальная граница QR - кода; (толщина слоя) от базы до толщины карты
+CONST_QR_CODE_MAX = [CONST_CARD_XYZ [0] / 2 - 3, CONST_CARD_XYZ [1] / 2 - 3, CONST_CARD_XYZ[2]]
+# минимальная граница QR - кода
+CONST_QR_CODE_MIN = [CONST_QR_CODE_MAX[0] - 32, CONST_QR_CODE_MAX[1] - 32, 0] 
+
+# имя файла - как надо сохранить
+CONST_FILE_NAME = "card_samonin_with_QR_code_v3.step"
+
+# путь к шрифту
+CONST_FONT_PATH =  "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf"
+# информация построчно
+CONST_TEXT_INFO = ["i q 3 d . r u", "Владимир", "Самонин", "+7 905 734 50 03"]
+# отступ слева
+CONST_TEXT_GAP_X_LEFT = 3
+
+CONST_URL_FOR_QR_CODE = "https://iq3d.ru"
+
+# КРИВИЗНА скругление для 90 градусов для дуги - как расстояние от середины дуги длины 2 до середины дуги
+CONST_BULGE_90 = (2 ** 0.5) - 1
+ 
+# вектор - нулевой; по одной из трёх осей (три отдельные функции с одним аргументом)
+F_0 = lambda: Vector(0,0,0); F_XY = lambda x,y: Vector(x,y,0)
+F_X = lambda n: Vector(n,0,0); F_Y = lambda n: Vector(0,n,0); F_Z = lambda n: Vector(0,0,n)   
+F_SET_LEN = lambda v, new_len: v.normalize().multiply(new_len)
+          
+# считай точку на середине изгиба дуги (известна нормаль плоскости, для прямой линии bulge = 0,  180 по ч.с. -1, 180 против ч.с. +1)
+def F_BULGE_POINT(va, vb, bulge = CONST_BULGE_90, v_normal_to_plane = F_Z(1)):
+    new_length = (vb-va).Length * bulge * 0.5 # длина от середины отрезка (хорды) до середины дуги
+    new_cross_vector_from_mid_to_result = F_SET_LEN((vb-va).cross(v_normal_to_plane), new_length)
+    return (vb + va) * 0.5 + new_cross_vector_from_mid_to_result
+
+# отрезок (или дуга окружности по параметру "изгиб") (считает среднюю точку с изгибом и проводит дугу через неё)
+def f_parse_AB_BULGE(va, vb, bulge, v_normal_to_plane = F_Z(1)):
+    # начало и конец совпадают, ничего не делай
+    if ((va - vb).Length == 0): return None
+    # нулевая кривизна - это отрезок
+    if (bulge == 0): return LineSegment(va, vb)
+    # считай среднюю точку
+    v_mid = F_BULGE_POINT(va, vb, bulge, v_normal_to_plane)
+    # верни дугу
+    return Arc(va, v_mid, vb)
+
+# массив из отрезков и дуг -> преврати в проволоку
+def f_convert_my_arr_el_to_wire(my_arr_el):
+    arr_el_as_shapes_before_filtered = [item for item in my_arr_el if item is not None]
+    arr_el_as_shapes_filtered = [i_obj.toShape() for i_obj in arr_el_as_shapes_before_filtered]
+    return Wire(arr_el_as_shapes_filtered)
+    
+# массив из отрезков и дуг -> преврати в shape (форму призму)
+def f_shape_prism_by_arr_el(my_arr_el, v_normal_to_plane):
+    return Face(f_convert_my_arr_el_to_wire(my_arr_el)).extrude(v_normal_to_plane)
+
+# скруглённый прямоугольник - для самОй визитки 
+def f_shape_round_rect(xyz = CONST_CARD_XYZ, radius = CONST_CARD_RADIUS, center = F_0()):
+    # вектора на половины размеров
+    vx_50 = F_X(xyz[0] * +0.5); vy_50 = F_Y(xyz[1] * +0.5)
+    # четырё угловые точки (углы прямоугольника)
+    p4 = [vx_50 * sign_x + vy_50 * sign_y for sign_x,sign_y in [[+1,+1],[-1,+1],[-1,-1],[+1,-1]]]
+    # 8 изменений для 4 вершин (итого будет 8 точек)
+    i0123_sign_x_sign_y = [[0, 0, -1], [0, -1, 0], [1, +1, 0], [1, 0, -1], [2, 0, +1], [2, +1, 0], [3, -1, 0], [3, 0, +1]]
+    # узлы скруглённого прямоугольника
+    p8 = [F_XY(radius * sign_x, radius * sign_y) + p4[i] for i,sign_x,sign_y in i0123_sign_x_sign_y]
+    # 8 элементов (отрезков и дуг)
+    p8_el = [f_parse_AB_BULGE(p8[i], p8[(i+1) % 8], CONST_BULGE_90 if ((i % 2) == 0) else 0) for i in [0,1,2,3,4,5,6,7]]
+    return f_shape_prism_by_arr_el(p8_el, F_Z(xyz[2]))
+
+# прямоугольник (для одиночной квадратной ячейки QR - кода)
+def f_shape_rect_by_sizes_and_translate(sizes_xyz, translate_xyz):
+    return Part.makeBox(sizes_xyz.x, sizes_xyz.y, sizes_xyz.z).translated(translate_xyz)
+
+# превращает массив форм в одну форму (склеивает и по умолчанию удаляет швы)
+def f_shape_multi_fuse(shapes): return shapes[0].multiFuse(shapes[1:])
+  
+## ====================================================================================================
+
+# генерация QR-кода с помощьб юиблиотеки qrcode 
+def f_qr_code(url = CONST_URL_FOR_QR_CODE, v_min = Vector(*CONST_QR_CODE_MIN), v_max = Vector(*CONST_QR_CODE_MAX)):
+    # непосредственно генерация QR кода (без границ)
+    qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=1, border=0)
+    # добавь ссылку на наш сайт
+    qr.add_data(url)
+    # это самая компактная версия QR-кода (делает матрицу наименьшей из возможных)
+    qr.make(fit=True)
+    matrix = qr.get_matrix()
+    # пишет нули и единицы вместо булевых значений
+    bit_matrix = [[1 if cell else 0 for cell in row] for row in matrix]
+    
+    # Вывод битовой матрицы построчно в консоль FreeCAD
+    for row in bit_matrix: Console.PrintMessage("".join(map(str, row)) + "\n")
+    
+    # размер по оси х матрицы и по оси у (столбцов и строк - они совпадают)
+    nx = len(bit_matrix[0])
+    ny = len(bit_matrix) 
+    sizes_xyz = Vector((v_max.x - v_min.x) / nx, (v_max.y - v_min.y) / ny, v_max.z - v_min.z)
+    p00 = Vector(v_min.x, v_max.y, v_min.z)
+    
+    # на сколько сдвигать нулевой-нулевой квадратик
+    # !! нулевую строку y смещай на -1, потому что размеры от ближнего угла, а не от дальнего
+    f_translate_ix_iy = lambda ix,iy: p00 + F_XY(sizes_xyz.x * ix, sizes_xyz.y * (-(iy+1)))
+    # фигура - клеточка
+    f_shape_ix_iy = lambda ix,iy: f_shape_rect_by_sizes_and_translate(sizes_xyz, f_translate_ix_iy(ix, iy))
+    
+    arr_shapes = []
+    for ix in range(nx):
+        for iy in range(ny):
+            if bit_matrix[iy][ix]:
+                arr_shapes.append(f_shape_ix_iy(ix, iy))
+    return f_shape_multi_fuse(arr_shapes)
+            
+# впиши, чтобы всё красиво помещалось
+def f_shape_fit_isometric():
+    doc.recompute(); view = activeDocument().ActiveView; view.viewIsometric(); view.fitAll()
+
+# одна строка текста
+def f_shape_string(text_str, extrude_mm, font_size, translate_xyz):
+    # строка с нужным шрифтом и размером шрифта
+    shapestring = make_shapestring(String=text_str, FontFile=CONST_FONT_PATH, Size=font_size)
+    # ограничивающий контейнер строки текста
+    bbox = shapestring.Shape.BoundBox
+    # выдави текст вверх
+    shape_result = shapestring.Shape.extrude(F_Z(extrude_mm))
+    # удали двумерную подложку
+    doc.removeObject(shapestring.Name)
+    # воровни по средней линии текста (у-координату), затем сдвинь весь текст на заданный вектор
+    return shape_result.translated(F_XY(0, -bbox.YLength / 2)).translated(translate_xyz)
+    
+# многострочный текст
+def f_shape_multi_string(arr_text_str = CONST_TEXT_INFO, extrude_mm = CONST_CARD_XYZ[2], font_size = CONST_TEXT_FONT_H, step_y = CONST_TEXT_LINE_H, gap_x = CONST_TEXT_GAP_X_LEFT - CONST_CARD_XYZ[0]*0.5):
+    # количество строк в тексте (текст выравниваем слева, а по высоте - по середине)
+    N_LINES = len(arr_text_str)
+    # массив - на сколько сдвигаем каждую строцку (для многострочного текста)
+    arr_translate_xyz = [Vector(gap_x, step_y * ((N_LINES-1) * 0.5 - i), CONST_TEXT_BASE) for i in list(range(N_LINES))]
+    # сами строчки (в зависимости от содержания и положения
+    arr_shapes = [f_shape_string(arr_text_str[i], extrude_mm, font_size, arr_translate_xyz[i]) for i in list(range(N_LINES))]
+    return f_shape_multi_fuse(arr_shapes)
+
+# форма a - текст и QR-код
+my_shape_a = f_shape_multi_string().fuse(f_qr_code()).removeSplitter()
+my_obj_a = doc.addObject("Part::Feature", "shape_a")
+my_obj_a.Shape = my_shape_a
+
+# форма b - пластина визитки за вычитом: текста и QR-кода
+my_shape_b = f_shape_round_rect().cut(my_shape_a).removeSplitter()
+my_obj_b = doc.addObject("Part::Feature", "shape_b")
+my_obj_b.Shape = my_shape_b
+    
+# Цвета
+my_obj_a.ViewObject.ShapeColor = (0.0, 0.0, 0.0)   # текст
+my_obj_b.ViewObject.ShapeColor = (1.0, 1.0, 0.0)   # фон
+
+# расположи всё, чтобы было видно
+f_shape_fit_isometric()
+
+# Экспорт
+my_folder_current_macro = os.path.dirname(os.path.abspath(__file__))
+my_filename = my_folder_current_macro + "/" + CONST_FILE_NAME
+ImportGui.export([my_obj_a, my_obj_b], my_filename)
+Console.PrintMessage("Экспортировано:", my_filename)
