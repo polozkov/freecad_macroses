@@ -1,0 +1,63 @@
+import FreeCAD, os, Draft, importSVG, FreeCADGui
+CONST_FILE_NAME = "logo_main.svg"
+
+# верни или создай активный документ
+doc = FreeCAD.ActiveDocument
+if doc is None: doc = FreeCAD.newDocument()
+
+# превращает массив форм в одну форму (склеивает и по умолчанию удаляет швы)
+def f_shape_multi_fuse(shapes):
+    if len(shapes) == 1: return shapes[0]
+    return shapes[0].multiFuse(shapes[1:])
+    
+def f_svg_to_shapes(height=0.2, file_name = CONST_FILE_NAME):
+    # Импортирует SVG и возвращает список экструдированных Part.Shape.
+    # Каждый замкнутый контур SVG превращается в отдельную форму.
+    # Никакие отверстия не обрабатываются и не объединяются.
+    full_path = os.path.dirname(os.path.abspath(__file__)) + "/" + file_name
+    importSVG.insert(full_path, doc.Name)
+    imported = doc.Objects
+    shapes = []
+    for obj in imported:
+        if not hasattr(obj, "Shape"):
+            continue
+        for wire in obj.Shape.Wires:
+            if not wire.isClosed():
+                continue
+            try:
+                face = Part.Face(wire)
+                shapes.append(face.extrude(FreeCAD.Vector(0, 0, height)).copy())
+            except Exception:
+                pass
+    # Удаляем все объекты Path
+    for obj in list(doc.Objects):
+        if obj.Name.startswith("Path"):
+            doc.removeObject(obj.Name)          
+    return shapes
+
+def f_bbox_inner_outer_xy(i, o):
+    # Проверка, что inner_bb находится внутри outer_bb.
+    return (i.XMin >= o.XMin) and (i.YMin >= o.YMin) and  (i.XMax <= o.XMax) and (i.YMax <= o.YMax)
+    
+def f_cut_inners_for_obj(LEN, arr_flags_are_objects = [True] * 19):
+    for i_inner in range(LEN):
+        for i_outer in range(LEN):
+            if (i_inner != i_outer) and arr_flags_are_objects[i_inner] and arr_flags_are_objects[i_outer]:
+                obj_inner = doc.getObject(f'svg_shape_{i_inner:03d}')
+                obj_outer = doc.getObject(f'svg_shape_{i_outer:03d}')
+                if f_bbox_inner_outer_xy(obj_inner.Shape.BoundBox, obj_outer.Shape.BoundBox):
+                    arr_flags_are_objects[i_inner] = False
+                    obj_outer.Shape = obj_outer.Shape.copy().cut(obj_inner.Shape.copy())
+                    doc.removeObject(f'svg_shape_{i_inner:03d}')
+                    f_cut_inners_for_obj(LEN, [*arr_flags_are_objects])
+                    return
+                     
+def f_add_shape_array_old(shape_array):
+    arr_obj = []
+    for i,i_shape in enumerate(shape_array):
+        arr_obj.append(doc.addObject("Part::Feature", f'svg_shape_{i:03d}'))
+        arr_obj[i].Shape = i_shape
+    f_cut_inners_for_obj(len(shape_array))
+    FreeCAD.Console.PrintMessage("SVG_FILE_WAS_INPORTED\n")
+
+f_add_shape_array_old(f_svg_to_shapes())
