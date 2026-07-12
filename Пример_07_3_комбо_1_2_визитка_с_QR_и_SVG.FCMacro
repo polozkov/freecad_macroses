@@ -28,13 +28,13 @@ CONST_URL_FOR_QR_CODE = "https://canapeclub.ru"
 CONST_BULGE_90 = (2 ** 0.5) - 1
 
 # размеры визитной карты: длина, ширина, высота
-CONST_CARD_XYZ = [90, 50, 10]
+CONST_CARD_XYZ = [90, 50, 0.4]
 X50, Y50, Z50 = [CONST_CARD_XYZ[0] * 0.5, CONST_CARD_XYZ[1] * 0.5, CONST_CARD_XYZ[2] * 0.5]
 GAP = 1.5
 GAP_CANAPE = 1.0
 
 # скругление угла визитной карточки
-CONST_CARD_RADIUS = 3
+CONST_CARD_RADIUS = 2
 
 # максимальная граница QR - кода; (толщина слоя) от базы до толщины карты
 CONST_QR_CODE_MAX = [X50 - GAP, Y50 - GAP, Z50 * 2]
@@ -162,7 +162,10 @@ def f_cut_holes_and_multi_fuse(shape_array):
 F_0 = lambda: Vector(0,0,0); F_XY = lambda x,y: Vector(x,y,0)
 F_X = lambda n: Vector(n,0,0); F_Y = lambda n: Vector(0,n,0); F_Z = lambda n: Vector(0,0,n)   
 F_SET_LEN = lambda v, new_len: v.normalize().multiply(new_len)
-          
+       
+F_M = lambda VX = F_X(1), VY = F_Y(1), VZ = F_Z(1), C = F_0():  Matrix(VX.x, VX.y, VX.z, C.x,   VY.x, VY.y, VY.z, C.y,   VZ.x, VZ.y, VZ.z, C.z,   0,0,0,1)
+M_44_FINAL_ROTATION = F_M(F_X(1), F_Y(-1), F_Z(-1), Vector(0,0,Z50 * 2))
+   
 # считай точку на середине изгиба дуги (известна нормаль плоскости, для прямой линии bulge = 0,  180 по ч.с. -1, 180 против ч.с. +1)
 def F_BULGE_POINT(va, vb, bulge = CONST_BULGE_90, v_normal_to_plane = F_Z(1)):
     new_length = (vb-va).Length * bulge * 0.5 # длина от середины отрезка (хорды) до середины дуги
@@ -338,12 +341,12 @@ def f_final_combine():
     # форма a - текст и QR-код
     my_shape_a = f_shape_multi_string(TEMP_border_xmax_last_string).fuse(svg_shape_post).fuse(f_qr_code()).removeSplitter()
     my_obj_a = doc.addObject("Part::Feature", "shape_a")
-    my_obj_a.Shape = my_shape_a
+    my_obj_a.Shape = my_shape_a.transformGeometry(M_44_FINAL_ROTATION)
     
     # форма b - пластина визитки за вычитом: текста и QR-кода
     my_shape_b = f_shape_round_rect().cut(my_shape_a).removeSplitter()
     my_obj_b = doc.addObject("Part::Feature", "shape_b")
-    my_obj_b.Shape = my_shape_b
+    my_obj_b.Shape = my_shape_b.transformGeometry(M_44_FINAL_ROTATION)
         
     # Цвета
     my_obj_a.ViewObject.ShapeColor = (0.0, 0.0, 0.0)   # текст
