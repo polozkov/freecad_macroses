@@ -1,0 +1,116 @@
+my_cell_size = 30
+my_wall_width = 3
+my_wall_height = 3
+my_hill_width = 10
+my_hill_hight = 5
+
+import FreeCAD, Part, FreeCADGui
+
+# верни или создай активный документ (если его нет)
+doc = FreeCAD.ActiveDocument
+if doc is None: doc = FreeCAD.newDocument()
+
+# превращает массив форм в одну форму (склеивает)
+def f_shape_multi_fuse(shapes):
+    if len(shapes) == 1:
+        return shapes[0]
+    return shapes[0].multiFuse(shapes[1:])
+                   
+# впиши, чтобы всё красиво помещалось
+def f_shape_fit_isometric():
+    doc.recompute()
+    view = FreeCADGui.activeDocument().ActiveView
+    view.viewIsometric()
+    view.fitAll()
+     
+### ====================================================================     
+     
+# трёхмерная точка (типа вектор) по трём координатам
+f_3d = lambda x=0,y=0,z=0: FreeCAD.Vector(x,y,z)
+# векторт вверх (по оси z)
+f_z = lambda z: FreeCAD.Vector(0,0,z)
+
+# строй призму; многоугольик из точек в любой плоскости; сдвигаешь на вектор выдавливания
+def f_prism(arr_v, extrude_v):
+    # пустой массив, в который добавляеешь отрезки основания призмы
+    arr_line_shapes = []
+    # количество точек в основании призмы (LEN-угольник)
+    LEN = len(arr_v)
+    # цикл для начальной точки [0,1,2...LEN-3,LEN-2,LEN-]
+    for i0 in range(LEN):
+        # индекс следующей точки [1,2...LEN-2,LEN-1,0] - последняя точка возвращается в нулевую
+        i1 = (i0+1) % LEN
+        # отрезок по двум точкам, конвертированный в форму Shape
+        i_new_line = Part.LineSegment(arr_v[i0], arr_v[i1]).toShape()
+        arr_line_shapes.append(i_new_line)
+    # контур, грань, выдавленнная призма - и потом верни многогранник "призма" - тип вывода: форма 
+    wire = Part.Wire(arr_line_shapes)
+    face = Part.Face(wire)
+    prism = face.extrude(extrude_v)
+    return prism
+
+# квадратная ячейка для формы (с холмиками для крепления "горкой") 
+def f_puzzle_cell(cell_size = my_cell_size, wall_width = my_wall_width, wall_height = my_wall_height, hill_width = my_hill_width, hill_height = my_hill_hight):
+    # четыре точки вгизу в форме квадрата с центром (0,0,0)
+    f_p4_square = lambda d: [f_3d(+d,+d), f_3d(-d,+d), f_3d(-d,-d), f_3d(+d,-d)]
+    # внешний контур ячейки
+    shape_cell_out = f_prism(f_p4_square(cell_size * 0.5), f_z(wall_height)) 
+    # внутренней вырез ячейки (отверстие)
+    shape_cell_in = f_prism(f_p4_square(cell_size * 0.5 - wall_width), f_z(wall_height))
+    # ячейка с вырезом (рамка - пока без холмов) 
+    shape_cell = shape_cell_out.cut(shape_cell_in)
+    
+    # треугольник вертикальный - для крепления-холма
+    f_p3_triangle = lambda dx, z0, z_up, y: [f_3d(+dx,y,z0), f_3d(-dx,y,z0), f_3d(0,y,z0+z_up)]
+    # точки на основании треугольной призмы - основание стоит и находится снаружи и идёт вглубь рамки
+    p3_hill = f_p3_triangle(hill_width * 0.5, wall_height, hill_height, -cell_size/2)
+    # призма-холм идёт внутрь на толщину стенок
+    shape_hill_fuse = f_prism(p3_hill, f_3d(0,wall_width,0))
+    # вырез снизу для холмика-крепления (слота)
+    shape_hill_cut = shape_hill_fuse.translated(f_z(-wall_height))
+    
+    # добавь холвик и вырежи холмик-вырез со всех 4 сторон (поворачивай на углы, кратные 90)
+    for i_deg in [0,90,180,270]:
+        # холмик, который надо добавить
+        i_fuse = shape_hill_fuse.rotated(f_3d(), f_z(1), i_deg)
+        # слот, который надо вырезать
+        i_cut = shape_hill_cut.rotated(f_3d(), f_z(1), i_deg)
+        shape_cell = shape_cell.fuse(i_fuse).cut(i_cut)
+    return shape_cell
+
+# полиммино - клетки с холмиками кверху
+def f_polyomino(arr_nxy, translate_nxy, cell_size = my_cell_size):
+    # генерируй точку по количеству клеток смещения на xy-плоскости
+    f_3d_nxy = lambda nxy: f_3d(nxy[0] * cell_size, nxy[1] * cell_size)
+    # генерируй одну клетку
+    f_shape_cell_nxy = lambda nxy: f_puzzle_cell().translated(f_3d_nxy(nxy))
+    # массив сгенерированных клеток
+    arr_cells = [f_shape_cell_nxy(nxy) for nxy in arr_nxy]
+    # массив объедени в одну форму и удали лишние (избыточные) рёбра
+    shape_multi = f_shape_multi_fuse(arr_cells).removeSplitter()
+    # верни всё полиммино, со сдвигом на нужный вектор
+    return shape_multi.translated(f_3d_nxy(translate_nxy))
+
+# Добавляем в документ
+def f_add_polyomino(arr_nxy, string_name, translate_nxy):
+    # создаёт объект в документе с нужным  именем
+    obj_polyomino = doc.addObject("Part::Feature", string_name)
+    # генерирует форму для этого объекта
+    obj_polyomino.Shape = f_polyomino(arr_nxy, translate_nxy)
+    
+    # считает и выводит в окно вывода объём текущего полимино
+    volume_sm_3 = obj_polyomino.Shape.Volume/1000
+    FreeCAD.Console.PrintMessage(f'NAME = {string_name} VOLUME sm^3 = {volume_sm_3:06.2f} \n')
+
+def f_add_6_tetramino():
+    f_add_polyomino([[0,0],[1,0],[2,0],[3,0]], "TETRAMINO__I", [2.5, 0.0])
+    f_add_polyomino([[0,0],[0,1],[1,0],[1,1]], "TETRAMINO__Q", [0.0, 0.0])
+    
+    f_add_polyomino([[0,1],[1,1],[1,0],[2,0]], "TETRAMINO_ZR", [0.0, 2.5])
+    f_add_polyomino([[0,0],[1,0],[1,1],[2,1]], "TETRAMINO_ZL", [3.5, 2.5])
+    
+    f_add_polyomino([[0,2],[0,1],[0,0],[1,0]], "TETRAMINO_LR", [0.0, 5.0])
+    f_add_polyomino([[1,2],[1,1],[1,0],[0,0]], "TETRAMINO_LL", [2.5, 5.0])
+    
+f_add_6_tetramino()
+f_shape_fit_isometric()
