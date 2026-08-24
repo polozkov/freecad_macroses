@@ -1,0 +1,46 @@
+import FreeCAD as App
+import Part
+from FreeCAD import Vector, Matrix
+
+F_0 = lambda: Vector(0,0,0)
+F_XY = lambda x,y: Vector(x,y,0)
+
+F_X = lambda n: Vector(n,0,0)
+F_Y = lambda n: Vector(0,n,0)
+F_Z = lambda n: Vector(0,0,n)
+
+F_M = lambda VX=F_X(1), VY=F_Y(1), VZ=F_Z(1), C=F_0(): Matrix(
+    VX.x, VX.y, VX.z, C.x,
+    VY.x, VY.y, VY.z, C.y,
+    VZ.x, VZ.y, VZ.z, C.z,
+    0,0,0,1
+)
+
+doc = App.ActiveDocument
+
+if not doc:
+    doc = App.newDocument("Sphere_Revolve")
+
+arc = Part.makeCircle(
+    1,
+    App.Vector(0,0,0),
+    App.Vector(0,0,1),
+    0,
+    180
+)
+
+sphere_shape = arc.revolve(
+    App.Vector(0,0,0),
+    App.Vector(1,0,0),
+    360
+)
+
+# растянуть X в 2 раза
+m = F_M(F_X(2), F_Y(1), F_Z(1))
+
+sphere_shape = sphere_shape.transformGeometry(m, True)
+
+obj = doc.addObject("Part::Feature", "Ball")
+obj.Shape = sphere_shape
+
+doc.recompute()
