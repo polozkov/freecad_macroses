@@ -1,0 +1,29 @@
+#Выпуклая оболочка
+import FreeCAD
+import Part
+
+import numpy as np
+from scipy.spatial import ConvexHull
+
+doc = FreeCAD.ActiveDocument
+if not doc:
+    doc = FreeCAD.newDocument("Sphere_Revolve")   
+
+def create_convex_hull(points_x_y_z):
+    np_points = np.array(points_x_y_z)
+    hull = ConvexHull(np_points)
+    # Создаем грани напрямую через генератор и сразу собираем в твердое тело
+    shell = Part.makeShell([
+        # *перед массивом - делает из массива отдельные параметры для функции создание 3Д точки
+        Part.Face(Part.makePolygon([FreeCAD.Vector(*np_points[v]) for v in face], True)) 
+        for face in hull.simplices
+    ])
+    # Удали лишние рёбра (например, диагональ квадрата)
+    return Part.Solid(shell).removeSplitter()
+    
+# Пример использования с точками
+points = [[0, 0, 25],  [10, 10, 0],  [10, -10, 0],  [-10, 10, 0], [-10, -10, 0]]
+# Добавляем объект в документ
+obj = doc.addObject("Part::Feature", "ConvexHull")
+obj.Shape = create_convex_hull(points)
+doc.recompute()
